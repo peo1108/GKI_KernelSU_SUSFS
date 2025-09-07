@@ -57,7 +57,11 @@ jobs:
 
       - name: Install dependencies
         if: ${{ inputs.use_make == true }}
-        run: sudo apt update && sudo apt install -y libelf-dev libssl-dev build-essential
+        run: sudo apt update && sudo apt install -y libelf-dev libssl-dev build-essential lz4
+
+      - name: Install lz4 for boot image compression
+        if: ${{ inputs.use_make == false && (inputs.android_version == 'android13' || inputs.android_version == 'android14' || inputs.android_version == 'android15') }}
+        run: sudo apt update && sudo apt install -y lz4
 
       - name: Install Repo
         run: |
@@ -77,6 +81,31 @@ jobs:
           git clone https://github.com/WildKernels/AnyKernel3.git -b "$ANYKERNEL_BRANCH"
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b "$SUSFS_BRANCH"
           git clone https://github.com/WildKernels/kernel_patches.git
+
+      - name: Download toolchain
+        run: |
+          AOSP_MIRROR=https://android.googlesource.com
+          BRANCH=main-kernel-build-2024
+          git clone $AOSP_MIRROR/kernel/prebuilts/build-tools -b $BRANCH --depth 1 kernel-build-tools
+          git clone $AOSP_MIRROR/platform/system/tools/mkbootimg -b $BRANCH --depth 1 mkbootimg
+
+      - name: Set environment variables
+        run: |
+          echo "AVBTOOL=$GITHUB_WORKSPACE/kernel-build-tools/linux-x86/bin/avbtool" >> $GITHUB_ENV
+          echo "MKBOOTIMG=$GITHUB_WORKSPACE/mkbootimg/mkbootimg.py" >> $GITHUB_ENV
+          echo "UNPACK_BOOTIMG=$GITHUB_WORKSPACE/mkbootimg/unpack_bootimg.py" >> $GITHUB_ENV
+
+      - name: Set boot sign key
+        env:
+          BOOT_SIGN_KEY: ${{ secrets.BOOT_SIGN_KEY }}
+        run: |
+          if [ ! -z "$BOOT_SIGN_KEY" ]; then
+            echo "$BOOT_SIGN_KEY" > ./kernel-build-tools/linux-x86/share/avb/testkey_rsa2048.pem
+            echo "BOOT_SIGN_KEY_PATH=$GITHUB_WORKSPACE/kernel-build-tools/linux-x86/share/avb/testkey_rsa2048.pem" >> $GITHUB_ENV
+          else
+            echo "BOOT_SIGN_KEY is not set. Using AOSP sign key..."
+            echo "BOOT_SIGN_KEY_PATH=$GITHUB_WORKSPACE/kernel-build-tools/linux-x86/share/avb/testkey_rsa2048.pem" >> $GITHUB_ENV
+          fi
 
       - name: Initialize and Sync Kernel Source
         run: |
@@ -470,6 +499,64 @@ jobs:
           
           make -j$(nproc --all) O=out $MAKE_ARGS KCFLAGS+="-Wno-error -O2 -flto=thin -fno-stack-protector" gki_defconfig || exit 1
           make -j$(nproc --all) O=out $MAKE_ARGS KCFLAGS+="-Wno-error -O2 -flto=thin -fno-stack-protector" || exit 1
+
+      - name: Create bootimgs directory and prepare Image files
+        if: ${{ inputs.android_version == 'android13' || inputs.android_version == 'android14' || inputs.android_version == 'android15' }}
+        run: |
+          echo "Creating bootimgs directory and preparing Image files..."
+          mkdir -p bootimgs
+          cd bootimgs
+          
+          if [ ${{ inputs.use_make }} == true ]; then
+            # Copy Image for make=true builds
+            cp ../$CONFIG/common/out/arch/arm64/boot/Image .
+          else
+            # Copy Image for make=false builds based on Android version
+            if [ "${{ inputs.android_version }}" = "android13" ]; then
+              echo "Copying images for Android 13..."
+              cp ../$CONFIG/out/${{ inputs.android_version }}-${{ inputs.kernel_version }}/dist/Image .
+            elif [ "${{ inputs.android_version }}" = "android14" ] || [ "${{ inputs.android_version }}" = "android15" ]; then
+              echo "Copying images for Android 14/15..."
+              cp ../$CONFIG/bazel-bin/common/kernel_aarch64/Image .
+            fi
+          fi
+          
+          # Create compressed versions
+          lz4 -9 -f Image Image.lz4
+
+      - name: Android 13/14/15 boot image build script
+        if: ${{ inputs.android_version == 'android13' || inputs.android_version == 'android14' || inputs.android_version == 'android15' }}
+        run: |
+          cd bootimgs
+
+          # Create gzip of the Image file
+          gzip -n -k -f -9 ./Image > ./Image.gz
+
+          echo "Building boot.img"
+          $MKBOOTIMG --header_version 4 --kernel Image --output boot.img
+          $AVBTOOL add_hash_footer --partition_name boot --partition_size $((64 * 1024 * 1024)) --image boot.img --algorithm SHA256_RSA2048 --key $BOOT_SIGN_KEY_PATH
+          # Use actual sublevel for LTS builds if available
+          SUBLEVEL_FOR_NAME="${{ inputs.sub_level }}"
+          if [ -n "$ACTUAL_SUBLEVEL" ]; then
+            SUBLEVEL_FOR_NAME="$ACTUAL_SUBLEVEL"
+          fi
+          cp ./boot.img ../WKSU-$KSUVER-${{ inputs.android_version }}-${{ inputs.kernel_version }}.$SUBLEVEL_FOR_NAME-${{ inputs.os_patch_level }}-boot.img
+
+          echo "Building boot-gz.img"
+          $MKBOOTIMG --header_version 4 --kernel Image.gz --output boot-gz.img
+          $AVBTOOL add_hash_footer --partition_name boot --partition_size $((64 * 1024 * 1024)) --image boot-gz.img --algorithm SHA256_RSA2048 --key $BOOT_SIGN_KEY_PATH
+          cp ./boot-gz.img ../WKSU-$KSUVER-${{ inputs.android_version }}-${{ inputs.kernel_version }}.$SUBLEVEL_FOR_NAME-${{ inputs.os_patch_level }}-boot-gz.img
+
+          echo "Building boot-lz4.img"
+          $MKBOOTIMG --header_version 4 --kernel Image.lz4 --output boot-lz4.img
+          $AVBTOOL add_hash_footer --partition_name boot --partition_size $((64 * 1024 * 1024)) --image boot-lz4.img --algorithm SHA256_RSA2048 --key $BOOT_SIGN_KEY_PATH
+          cp ./boot-lz4.img ../WKSU-$KSUVER-${{ inputs.android_version }}-${{ inputs.kernel_version }}.$SUBLEVEL_FOR_NAME-${{ inputs.os_patch_level }}-boot-lz4.img
+
+      - name: Compress all img files with gzip
+        run: |
+          for image in *.img; do
+            gzip -vnf9 "$image"
+          done
 
       - name: Create Kernel ZIP
         run: |
