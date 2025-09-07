@@ -541,80 +541,44 @@ jobs:
           $AVBTOOL add_hash_footer --partition_name boot --partition_size $((64 * 1024 * 1024)) --image boot-lz4.img --algorithm SHA256_RSA2048 --key $BOOT_SIGN_KEY_PATH
           cp ./boot-lz4.img ../WKSU-$KSUVER-${{ inputs.android_version }}-${{ inputs.kernel_version }}.$SUBLEVEL_FOR_NAME-${{ inputs.os_patch_level }}-boot-lz4.img
 
-      - name: Create organized ZIP files
+      - name: Create Kernel ZIP
         run: |
-          echo "Creating organized ZIP files..."
+          echo "Creating kernel ZIP..."
           
+          if [ ${{ inputs.use_make }} == true ]; then
+            # Copy Image for make=true builds
+            cp $CONFIG/common/out/arch/arm64/boot/Image AnyKernel3/Image
+          else
+            # Copy Image for make=false builds based on Android version
+            if [ "${{ inputs.android_version }}" = "android12" ] || [ "${{ inputs.android_version }}" = "android13" ]; then
+              echo "Copying images for Android 12/13..."
+              cp ./$CONFIG/out/${{ inputs.android_version }}-${{ inputs.kernel_version }}/dist/Image AnyKernel3/Image
+            elif [ "${{ inputs.android_version }}" = "android14" ] || [ "${{ inputs.android_version }}" = "android15" ]; then
+              echo "Copying images for Android 14/15..."
+              cp ./$CONFIG/bazel-bin/common/kernel_aarch64/Image AnyKernel3/Image
+            fi
+          fi
+          
+          # Create ZIP file
+          cd AnyKernel3
           # Use actual sublevel for LTS builds if available
           SUBLEVEL_FOR_NAME="${{ inputs.sub_level }}"
           if [ -n "$ACTUAL_SUBLEVEL" ]; then
             SUBLEVEL_FOR_NAME="$ACTUAL_SUBLEVEL"
           fi
-          
-          BASE_NAME="WKSU-$KSUVER-${{ inputs.android_version }}-${{ inputs.kernel_version }}.$SUBLEVEL_FOR_NAME-${{ inputs.os_patch_level }}"
-          
-          # 1. Create AnyKernel3 ZIP
-          echo "Creating AnyKernel3 ZIP..."
-          if [ ${{ inputs.use_make }} == true ]; then
-            cp $CONFIG/common/out/arch/arm64/boot/Image AnyKernel3/Image
-          else
-            if [ "${{ inputs.android_version }}" = "android12" ] || [ "${{ inputs.android_version }}" = "android13" ]; then
-              cp ./$CONFIG/out/${{ inputs.android_version }}-${{ inputs.kernel_version }}/dist/Image AnyKernel3/Image
-            elif [ "${{ inputs.android_version }}" = "android14" ] || [ "${{ inputs.android_version }}" = "android15" ]; then
-              cp ./$CONFIG/bazel-bin/common/kernel_aarch64/Image AnyKernel3/Image
-            fi
-          fi
-          cd AnyKernel3
-          zip -r "../${BASE_NAME}-AnyKernel3.zip" ./*
-          cd ..
-          
-          # 2. Create Image/Kernels ZIP
-          echo "Creating Image/Kernels ZIP..."
-          mkdir -p kernels_temp
-          if [ ${{ inputs.use_make }} == true ]; then
-            cp $CONFIG/common/out/arch/arm64/boot/Image kernels_temp/
-          else
-            if [ "${{ inputs.android_version }}" = "android12" ] || [ "${{ inputs.android_version }}" = "android13" ]; then
-              cp ./$CONFIG/out/${{ inputs.android_version }}-${{ inputs.kernel_version }}/dist/Image kernels_temp/
-            elif [ "${{ inputs.android_version }}" = "android14" ] || [ "${{ inputs.android_version }}" = "android15" ]; then
-              cp ./$CONFIG/bazel-bin/common/kernel_aarch64/Image kernels_temp/
-            fi
-          fi
-          cd kernels_temp
-          zip -r "../${BASE_NAME}-Kernels.zip" ./*
-          cd ..
-          rm -rf kernels_temp
-          
-          # 3. Create Boot Images ZIP (only for Android 13/14/15)
-          if [ "${{ inputs.android_version }}" = "android13" ] || [ "${{ inputs.android_version }}" = "android14" ] || [ "${{ inputs.android_version }}" = "android15" ]; then
-            echo "Creating Boot Images ZIP..."
-            mkdir -p bootimgs_temp
-            cp *.img.gz bootimgs_temp/ 2>/dev/null || echo "No .img.gz files found"
-            if [ -d "bootimgs_temp" ] && [ "$(ls -A bootimgs_temp)" ]; then
-              cd bootimgs_temp
-              zip -r "../${BASE_NAME}-BootImages.zip" ./*
-              cd ..
-            else
-              echo "No boot images to package"
-            fi
-            rm -rf bootimgs_temp
-          fi
+          ZIP_NAME="WKSU-$KSUVER-${{ inputs.android_version }}-${{ inputs.kernel_version }}.$SUBLEVEL_FOR_NAME-${{ inputs.os_patch_level }}-AnyKernel3.zip"
+          echo "Creating zip file: $ZIP_NAME..."
+          zip -r "../$ZIP_NAME" ./*
   
-      - name: Upload AnyKernel3 Artifact
+      - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: WKSU-${{ env.CONFIG }}-AnyKernel3
-          path: "*-AnyKernel3.zip"
-          
-      - name: Upload Kernels Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: WKSU-${{ env.CONFIG }}-Kernels
-          path: "*-Kernels.zip"
-          
-      - name: Upload Boot Images Artifact
-        if: inputs.android_version == 'android13' || inputs.android_version == 'android14' || inputs.android_version == 'android15'
-        uses: actions/upload-artifact@v4
-        with:
-          name: WKSU-${{ env.CONFIG }}-BootImages
-          path: "*-BootImages.zip"
+          name: WKSU-kernel-${{ env.CONFIG }}
+          path: |
+            *.zip
+            *.img
+            *.img.gz
+            *Image*
+            bootimgs/Image
+            bootimgs/Image.gz
+            bootimgs/Image.lz4
