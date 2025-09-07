@@ -570,6 +570,15 @@ jobs:
           echo "Creating zip file: $ZIP_NAME..."
           zip -r "../$ZIP_NAME" ./*
   
+      - name: Move boot images to root for upload
+        run: |
+          # Move all boot images and compressed images to root directory
+          if [ -d "bootimgs" ]; then
+            mv bootimgs/*.img . 2>/dev/null || true
+            mv bootimgs/*.img.gz . 2>/dev/null || true
+            mv bootimgs/Image* . 2>/dev/null || true
+          fi
+  
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -577,8 +586,4 @@ jobs:
           path: |
             *.zip
             *.img
-            *.img.gz
             *Image*
-            bootimgs/Image
-            bootimgs/Image.gz
-            bootimgs/Image.lz4
